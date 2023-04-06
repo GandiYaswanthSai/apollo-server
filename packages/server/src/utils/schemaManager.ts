@@ -11,9 +11,20 @@ import type {
   GraphQLSchemaContext,
 } from '../externalTypes/index.js';
 
+import * as pg from 'pg';
+
+import { Neo4jGraphQL } from '@neo4j/graphql';
+import type { Driver } from 'neo4j-driver';
+import { Kafka } from 'kafkajs';
+import type { ApolloServerOptionsForKafkaListener } from '../externalTypes/constructor.js';
+
 type SchemaDerivedDataProvider = (
   apiSchema: GraphQLSchema,
 ) => SchemaDerivedData;
+
+type SchemaMap = {
+  [tenantName: string] : SchemaDerivedData;
+};
 
 /**
  * An async-safe class for tracking changes in schemas and schema-derived data.
@@ -37,6 +48,12 @@ export class SchemaManager {
   private isStopped = false;
   private schemaDerivedData?: SchemaDerivedData;
   private schemaContext?: GraphQLSchemaContext;
+  private neo4jDriver?:Driver;
+  private kafkaProperties?:ApolloServerOptionsForKafkaListener;
+
+  private schemaMap:SchemaMap = {};
+
+  private pgclient:pg.Client;
 
   // For state that's specific to the mode of operation.
   private readonly modeSpecificState:
@@ -55,7 +72,7 @@ export class SchemaManager {
   constructor(
     options: (
       | { gateway: GatewayInterface; apolloConfig: ApolloConfig }
-      | { apiSchema: GraphQLSchema }
+      | { apiSchema: GraphQLSchema; neo4jDriver?: Driver; kafkaProperties?: ApolloServerOptionsForKafkaListener }
     ) & {
       logger: Logger;
       schemaDerivedDataProvider: SchemaDerivedDataProvider;
@@ -63,6 +80,9 @@ export class SchemaManager {
   ) {
     this.logger = options.logger;
     this.schemaDerivedDataProvider = options.schemaDerivedDataProvider;
+    this.schemaMap = {};
+    this.pgclient = new pg.Client("postgres://postgres:postgres@10.11.10.128:5432/__multitenantdb");
+    this.pgclient.connect();
     if ('gateway' in options) {
       this.modeSpecificState = {
         mode: 'gateway',
@@ -70,6 +90,8 @@ export class SchemaManager {
         apolloConfig: options.apolloConfig,
       };
     } else {
+      this.neo4jDriver = options.neo4jDriver;
+      this.kafkaProperties = options.kafkaProperties;
       this.modeSpecificState = {
         mode: 'schema',
         apiSchema: options.apiSchema,
@@ -117,6 +139,37 @@ export class SchemaManager {
         },
         this.modeSpecificState.schemaDerivedData,
       );
+      if(this.neo4jDriver && this.kafkaProperties){
+        let kafka = new Kafka({brokers:['localhost:9092']});
+        let consumer = kafka.consumer({groupId:'21323'});
+        await consumer.connect();
+        await consumer.subscribe({ topic: 'graphqlschemas', fromBeginning: true });
+        await consumer.run({
+          eachMessage: async ({ topic, partition, message }) => {
+            console.log({
+              partition,
+              offset: message.offset,
+              value: message.value?.toString(),
+              topic:topic
+            });
+            if(message.value){
+              console.log("updating tenant in cache... : ", message.value.toString());
+              let query = await this.pgclient.query("select * from graphschemas where tenant_name='"+message.value.toString()+"'");
+              let typeDefs = '';
+              if(query.rowCount>0){
+                for(var i=0;i<query.rowCount;i++){
+                  typeDefs = typeDefs + '\n' + query.rows[i]['schema_text'];
+                }
+                let graphsch = await new Neo4jGraphQL({typeDefs:typeDefs, driver: this.neo4jDriver, config:{driverConfig:{database:message.value.toString()}}}).getSchema();
+                this.schemaMap[message.value.toString()]=this.schemaDerivedDataProvider(graphsch);
+                console.log("updated tenant in cache!!! : ", message.value.toString());
+              }else{
+                throw new Error('No schemas found for this tenant : ' + message.value.toString());
+              }
+            }
+          },
+        });
+      }
       return null;
     }
   }
@@ -162,6 +215,13 @@ export class SchemaManager {
     };
   }
 
+  public getDriver():Driver{
+    if(!this.neo4jDriver){
+      throw new Error('You must declare a driver!!!');
+    }
+    return this.neo4jDriver;
+  }
+
   /**
    * Get the schema-derived state for the current schema. This throws if called
    * before start() is called.
@@ -171,6 +231,30 @@ export class SchemaManager {
       throw new Error('You must call start() before getSchemaDerivedData()');
     }
     return this.schemaDerivedData;
+  }
+
+  public async getSchemaDerivedDataMultiTenant(tenant: string): Promise<SchemaDerivedData> {
+    if (!this.schemaDerivedData) {
+      throw new Error('You must call start() before getSchemaDerivedData()');
+    }
+    console.log("Schema derived data of tenant :", tenant);
+    if(this.schemaMap[tenant]===undefined){
+      console.log("tenant not present in cache : ", tenant);
+      console.log("adding tenant in cache... : ", tenant);
+      let query = await this.pgclient.query("select * from graphschemas where tenant_name='"+tenant+"'");
+      let typeDefs = '';
+      if(query.rowCount>0){
+        for(var i=0;i<query.rowCount;i++){
+          typeDefs = typeDefs + '\n' + query.rows[i]['schema_text'];
+        }
+        let graphsch = await new Neo4jGraphQL({typeDefs:typeDefs, driver: this.neo4jDriver, config:{driverConfig:{database:tenant}}}).getSchema();
+        this.schemaMap[tenant]=this.schemaDerivedDataProvider(graphsch);
+        console.log("added tenant in cache!!! : ", tenant);
+      }else{
+        throw new Error('No schemas found for this tenant : ' + tenant);
+      }
+    }
+    return this.schemaMap[tenant];
   }
 
   /**

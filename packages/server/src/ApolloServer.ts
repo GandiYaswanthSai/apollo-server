@@ -64,7 +64,7 @@ import { SchemaManager } from './utils/schemaManager.js';
 import { isDefined } from './utils/isDefined.js';
 import { UnreachableCaseError } from './utils/UnreachableCaseError.js';
 import type { WithRequired } from '@apollo/utils.withrequired';
-import type { ApolloServerOptionsWithStaticSchema } from './externalTypes/constructor.js';
+import type { ApolloServerOptionsForKafkaListener, ApolloServerOptionsWithStaticSchema } from './externalTypes/constructor.js';
 import type { GatewayExecutor } from '@apollo/server-gateway-interface';
 import type { GraphQLExperimentalIncrementalExecutionResults } from './incrementalDeliveryPolyfill.js';
 import { HeaderMap } from './utils/HeaderMap.js';
@@ -72,6 +72,12 @@ import type {
   ExecuteOperationOptions,
   VariableValues,
 } from './externalTypes/graphql.js';
+import type { Driver } from 'neo4j-driver';
+
+
+type IHashMap = {
+  [tenantName: string] : string;
+};
 
 const NoIntrospection: ValidationRule = (context: ValidationContext) => ({
   Field(node) {
@@ -210,10 +216,13 @@ export class ApolloServer<in out TContext extends BaseContext = BaseContext> {
 
   public readonly cache: KeyValueCache<string>;
   public readonly logger: Logger;
+  private readonly driver: Driver|undefined;
+  private readonly kafkaProperties : ApolloServerOptionsForKafkaListener|undefined;
 
   constructor(config: ApolloServerOptions<TContext>) {
     const nodeEnv = config.nodeEnv ?? process.env.NODE_ENV ?? '';
-
+    this.driver = config.driver ?? undefined;
+    this.kafkaProperties = config.kafkaProperties ?? undefined;
     this.logger = config.logger ?? defaultLogger();
 
     const apolloConfig = determineApolloConfig(config.apollo);
@@ -270,6 +279,8 @@ export class ApolloServer<in out TContext extends BaseContext = BaseContext> {
                 config.documentStore,
               ),
             logger: this.logger,
+            neo4jDriver:this.driver,
+            kafkaProperties: this.kafkaProperties
           }),
         };
 
@@ -1054,12 +1065,13 @@ export class ApolloServer<in out TContext extends BaseContext = BaseContext> {
           httpGraphQLRequest,
         );
       }
-
+      var icontext: IHashMap;
+      icontext = contextValue as IHashMap;
       return await runPotentiallyBatchedHttpQuery(
         this,
         httpGraphQLRequest,
         contextValue,
-        runningServerState.schemaManager.getSchemaDerivedData(),
+        await runningServerState.schemaManager.getSchemaDerivedDataMultiTenant(icontext['tenant']),
         this.internals,
       );
     } catch (maybeError_: unknown) {

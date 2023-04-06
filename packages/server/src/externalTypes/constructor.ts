@@ -19,6 +19,7 @@ import type { GatewayInterface } from '@apollo/server-gateway-interface';
 import type { ApolloServerPlugin } from './plugins.js';
 import type { BaseContext } from './index.js';
 import type { GraphQLExperimentalIncrementalExecutionResults } from '../incrementalDeliveryPolyfill.js';
+import type { Driver } from 'neo4j-driver';
 
 export type DocumentStore = KeyValueCache<DocumentNode>;
 
@@ -110,16 +111,25 @@ export interface ApolloServerOptionsWithGateway<TContext extends BaseContext>
   extends ApolloServerOptionsBase<TContext> {
   gateway: GatewayInterface;
   schema?: undefined;
+  driver?: undefined;
   typeDefs?: undefined;
   resolvers?: undefined;
+  kafkaProperties?: undefined;
+}
+
+export interface ApolloServerOptionsForKafkaListener{
+  topic: string;
+  kafkaHost: string;
 }
 
 export interface ApolloServerOptionsWithSchema<TContext extends BaseContext>
   extends ApolloServerOptionsBase<TContext> {
   schema: GraphQLSchema;
+  driver?: Driver | undefined;
   gateway?: undefined;
   typeDefs?: undefined;
   resolvers?: undefined;
+  kafkaProperties?: ApolloServerOptionsForKafkaListener;
 }
 
 export interface ApolloServerOptionsWithTypeDefs<TContext extends BaseContext>
@@ -129,8 +139,10 @@ export interface ApolloServerOptionsWithTypeDefs<TContext extends BaseContext>
   // `schema` instead.)
   typeDefs: IExecutableSchemaDefinition<TContext>['typeDefs'];
   resolvers?: IExecutableSchemaDefinition<TContext>['resolvers'];
+  driver?: undefined;
   gateway?: undefined;
   schema?: undefined;
+  kafkaProperties?: undefined;
 }
 
 // Used internally in ApolloServer.ts but not publicly exported.
